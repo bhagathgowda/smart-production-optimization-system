@@ -1,0 +1,5 @@
+Vertex,Tables_X,Chairs_Y,Profit,Labour_Used,Wood_Used,Is_Optimal,Explanation
+O,0,0,0,0,0,No,Origin
+A,60,0,2400,240,120,No,X-axis feasible intercept
+B,40,40,2800,240,240,Yes,Intersection of labour and wood constraints; maximum profit
+C,0,60,1800,120,240,No,Y-axis feasible intercept

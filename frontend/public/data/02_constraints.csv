@@ -1,0 +1,5 @@
+Constraint_ID,Resource,Tables_Coefficient,Chairs_Coefficient,Limit,Unit,Equation,Meaning
+C1,Labour,4,2,240,hours,4X + 2Y <= 240,Each table uses 4 labour hours; each chair uses 2 labour hours.
+C2,Wood,2,4,240,units,2X + 4Y <= 240,Each table uses 2 wood units; each chair uses 4 wood units.
+C3,Non-negativity,1,0,0,units,X >= 0,Production of tables cannot be negative.
+C4,Non-negativity,0,1,0,units,Y >= 0,Production of chairs cannot be negative.
