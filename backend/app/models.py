@@ -36,7 +36,7 @@ class ProductionGrid(Base):
     wood_slack = Column(Float, nullable=False)
     profit = Column(Float, nullable=False)
     is_feasible = Column(String, nullable=False)
-    feasible_profit = Column(Float, nullable=False)
+    feasible_profit = Column(Float, nullable=True)
 
 class CornerPoint(Base):
     __tablename__ = "corner_points"

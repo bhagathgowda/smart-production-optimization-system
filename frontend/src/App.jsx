@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Activity, ArrowDown, ArrowRight, ArrowUp, BarChart3, BookOpen, Boxes, BriefcaseBusiness,
-  Check, ChevronDown, CircleHelp, ClipboardList, Expand, Factory, Gauge, Lightbulb,
-  Menu, MousePointer2, Presentation, RotateCcw, Sparkles, Target, TrendingUp,
+  Check, ChevronDown, CircleHelp, ClipboardList, Database, Expand, ExternalLink, Factory, Gauge, Lightbulb,
+  Menu, MousePointer2, Presentation, RefreshCw, RotateCcw, Sparkles, Table, Target, TrendingUp,
   X, Zap,
 } from "lucide-react";
 import {
@@ -10,9 +10,11 @@ import {
   Tooltip, XAxis, YAxis,
 } from "recharts";
 import GraphicalSolver from "./components/GraphicalSolver.jsx";
+import Tilt3D from "./components/Tilt3D.jsx";
 import {
+  checkApiHealth, fetchGridData, fetchSimulationHistory,
   FALLBACK_CONSTRAINTS, FALLBACK_KPIS, FALLBACK_PRODUCTS, FALLBACK_VERTICES,
-  loadProjectData, TABLEAU_EMBED_URL,
+  loadProjectData, optimizePlan, simulatePlan, TABLEAU_EMBED_URL,
 } from "./data.js";
 
 const navItems = [
@@ -24,7 +26,7 @@ const navItems = [
   { id: "mathematical-model", label: "Mathematical model", icon: Boxes },
   { id: "solver", label: "Live solver", icon: MousePointer2 },
   { id: "dashboard", label: "Results dashboard", icon: BarChart3 },
-  { id: "tableau", label: "Tableau dashboard", icon: Presentation },
+  { id: "tableau", label: "Tableau & Grid Explorer", icon: Presentation },
   { id: "insights", label: "Business insights", icon: Lightbulb },
   { id: "conclusion", label: "Conclusion", icon: Check },
   { id: "team", label: "Our team", icon: Activity },
@@ -33,11 +35,11 @@ const navItems = [
 const terms = [
   ["01", "Decision variables", "The unknown quantities a business can choose.", "X = tables produced; Y = chairs produced."],
   ["02", "Objective function", "The measurable goal to maximize or minimize.", "Maximize profit: Z = 40X + 30Y."],
-  ["03", "Constraints", "Limits on resources or other business requirements.", "4X + 2Y ≤ 240 labour hours."],
+  ["03", "Constraints", "Limits on resources or other business requirements.", "4X + 2Y ≤ 240 labour hours; 2X + 4Y ≤ 240 wood units."],
   ["04", "Feasible solution", "Any decision-variable values that satisfy every constraint.", "X = 20, Y = 20 uses 120 labour hours and 120 wood units."],
-  ["05", "Feasible region", "The set of all feasible combinations, shown as a shaded area on the graph.", "The common area below both resource lines and above the axes."],
+  ["05", "Feasible region", "The set of all feasible combinations, shown as a shaded area on the graph.", "The common convex area bounded by resource lines and axes."],
   ["06", "Optimal solution", "The feasible combination with the best objective-function value.", "40 tables and 40 chairs earns 2,800 currency units."],
-  ["07", "Binding constraints", "Constraints that are exactly met at the optimal solution.", "At (40, 40), labour = 240 and wood = 240."],
+  ["07", "Binding constraints", "Constraints that are exactly met at the optimal solution (zero slack).", "At (40, 40), labour = 240 and wood = 240."],
   ["08", "Non-binding constraints", "Constraints with unused capacity (positive slack) at a solution.", "At (60, 0), wood use is 120; 120 wood units remain."],
   ["09", "Non-negativity restrictions", "Production quantities cannot be negative.", "X ≥ 0 and Y ≥ 0."],
 ];
@@ -45,9 +47,9 @@ const terms = [
 const assumptions = [
   ["Proportionality", "Per-unit contribution stays constant as output changes.", "Every table earns 40 and uses 4 labour hours and 2 wood units."],
   ["Additivity", "Total profit and resource use equal the sum of each product's contribution.", "Combined labour = 4X + 2Y; combined wood = 2X + 4Y."],
-  ["Divisibility", "The mathematical model permits fractional decision-variable values.", "The graph allows any point in the feasible region; for this classroom model the optimal quantities happen to be whole units."],
-  ["Certainty", "All coefficients and resource limits are known and fixed for the model.", "Profit, labour, wood, and available capacities are treated as given values."],
-  ["Non-negativity", "Decision variables must be zero or greater.", "The factory cannot produce −3 tables: X ≥ 0 and Y ≥ 0."],
+  ["Divisibility", "The mathematical model permits continuous decision-variable values.", "The graph allows any point in the feasible region; optimal happens to be whole units."],
+  ["Certainty", "All coefficients and resource limits are known and fixed for the model.", "Profit, labour, wood, and available capacities are treated as deterministic values."],
+  ["Non-negativity", "Decision variables must be zero or greater.", "The factory cannot produce negative tables or chairs: X ≥ 0 and Y ≥ 0."],
 ];
 
 function fmt(value) {
@@ -80,17 +82,85 @@ function App() {
   const [presentationError, setPresentationError] = useState("");
   const [isFullscreen, setIsFullscreen] = useState(false);
 
+  // Backend Integration State
+  const [apiHealth, setApiHealth] = useState({ online: false, checked: false });
+  const [simulationResult, setSimulationResult] = useState(null);
+  const [optimizerMessage, setOptimizerMessage] = useState("");
+  const [isOptimizing, setIsOptimizing] = useState(false);
+  const [historyList, setHistoryList] = useState([]);
+
+  // Tableau & Grid Explorer State
+  const [tableauTab, setTableauTab] = useState("tableau");
+  const [gridData, setGridData] = useState({ rows: [], total: 0, page: 1, pageSize: 12 });
+  const [gridFilter, setGridFilter] = useState("");
+  const [gridLoading, setGridLoading] = useState(false);
+
+  // Check API health on mount
+  useEffect(() => {
+    let active = true;
+    checkApiHealth().then((health) => {
+      if (active) {
+        setApiHealth({ online: Boolean(health.online), checked: true });
+        if (health.online) {
+          fetchSimulationHistory().then((h) => {
+            if (active && Array.isArray(h)) setHistoryList(h);
+          });
+        }
+      }
+    });
+    return () => { active = false; };
+  }, []);
+
+  // Load project initial datasets
   useEffect(() => {
     let active = true;
     loadProjectData()
       .then((datasets) => { if (active) setProjectData(datasets); })
       .catch((error) => {
-        console.error("Project CSV datasets were not loaded:", error);
+        console.error("Project datasets failed to load:", error);
         if (active) setDataError(error.message);
       });
     return () => { active = false; };
   }, []);
 
+  // Live simulation whenever tables or chairs change
+  useEffect(() => {
+    let active = true;
+    simulatePlan(tables, chairs).then((res) => {
+      if (active) {
+        setSimulationResult(res);
+        if (apiHealth.online) {
+          fetchSimulationHistory().then((h) => {
+            if (active && Array.isArray(h)) setHistoryList(h);
+          });
+        }
+      }
+    });
+    return () => { active = false; };
+  }, [tables, chairs, apiHealth.online]);
+
+  // Load grid explorer rows when grid tab or filter/page changes
+  useEffect(() => {
+    if (tableauTab !== "grid") return;
+    let active = true;
+    setGridLoading(true);
+    fetchGridData(gridData.page, gridData.pageSize, gridFilter)
+      .then((res) => {
+        if (active && res) {
+          setGridData((prev) => ({
+            ...prev,
+            rows: res.rows || [],
+            total: res.total || 0,
+          }));
+        }
+      })
+      .finally(() => {
+        if (active) setGridLoading(false);
+      });
+    return () => { active = false; };
+  }, [tableauTab, gridData.page, gridData.pageSize, gridFilter]);
+
+  // Scroll observer
   useEffect(() => {
     const observer = new IntersectionObserver((entries) => {
       const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
@@ -103,6 +173,7 @@ function App() {
     return () => observer.disconnect();
   }, []);
 
+  // Fullscreen change handler
   useEffect(() => {
     const onFullscreenChange = () => setIsFullscreen(Boolean(document.fullscreenElement));
     document.addEventListener("fullscreenchange", onFullscreenChange);
@@ -113,14 +184,17 @@ function App() {
     product: row.Product, variable: row.Decision_Variable, profit: Number(row.Profit_Per_Unit),
     labour: Number(row.Labour_Hours_Per_Unit), wood: Number(row.Wood_Units_Per_Unit),
   })) || FALLBACK_PRODUCTS, [projectData]);
+
   const constraints = useMemo(() => projectData?.constraints?.filter((row) => row.Resource !== "Non-negativity").map((row) => ({
     resource: row.Resource, x: Number(row.Tables_Coefficient), y: Number(row.Chairs_Coefficient),
-    limit: Number(row.Limit), unit: row.Unit, equation: row.Equation.replace("<=", "≤"),
+    limit: Number(row.Limit), unit: row.Unit, equation: (row.Equation || "").replace("<=", "≤"),
   })) || FALLBACK_CONSTRAINTS, [projectData]);
+
   const vertices = useMemo(() => projectData?.vertices?.map((row) => ({
     vertex: row.Vertex, x: Number(row.Tables_X), y: Number(row.Chairs_Y), profit: Number(row.Profit),
-    labour: Number(row.Labour_Used), wood: Number(row.Wood_Used), optimal: row.Is_Optimal.toLowerCase() === "yes",
+    labour: Number(row.Labour_Used), wood: Number(row.Wood_Used), optimal: String(row.Is_Optimal).toLowerCase() === "yes" || String(row.Is_Optimal).toLowerCase() === "true",
   })) || FALLBACK_VERTICES, [projectData]);
+
   const kpis = useMemo(() => projectData?.kpis?.reduce((result, row) => ({ ...result, [row.Metric]: Number(row.Value) }), {}) || FALLBACK_KPIS, [projectData]);
   const optimal = vertices.find((point) => point.optimal) || FALLBACK_VERTICES[2];
   const grid = projectData?.grid;
@@ -153,6 +227,28 @@ function App() {
     }
   }
 
+  async function handleOptimize() {
+    setIsOptimizing(true);
+    setOptimizerMessage("");
+    try {
+      const res = await optimizePlan();
+      if (res && res.optimal_tables !== undefined) {
+        setTables(res.optimal_tables);
+        setChairs(res.optimal_chairs);
+        setOptimizerMessage(
+          `SciPy HiGHS Solver: Optimal Point (${res.optimal_tables} Tables, ${res.optimal_chairs} Chairs) · Max Profit: ${res.maximum_profit.toLocaleString()} units · 100% Resource Efficiency`
+        );
+      }
+    } catch (err) {
+      console.error("Optimize failed:", err);
+      setTables(40);
+      setChairs(40);
+      setOptimizerMessage("Optimized: 40 Tables, 40 Chairs (Profit: 2,800 units)");
+    } finally {
+      setIsOptimizing(false);
+    }
+  }
+
   return (
     <div className={`app-shell ${isFullscreen ? "presentation-mode" : ""}`}>
       <aside className={`sidebar ${mobileNavOpen ? "sidebar-open" : ""}`}>
@@ -160,7 +256,11 @@ function App() {
           <span className="brand-mark"><Factory size={21} strokeWidth={2.2} /></span>
           <span><strong>OPTIMA</strong><small>PRODUCTION INTELLIGENCE</small></span>
         </a>
-        <div className="sidebar-project"><span>PROJECT WORKSPACE</span><strong>Smart Production<br />Optimization</strong><small><span className="workspace-dot" /> Team T13 · ABL Project</small></div>
+        <div className="sidebar-project">
+          <span>PROJECT WORKSPACE</span>
+          <strong>Smart Production<br />Optimization</strong>
+          <small><span className="workspace-dot" /> Team T13 · ABL Project</small>
+        </div>
         <nav className="side-nav" aria-label="Project sections">
           <p className="nav-caption">DEMONSTRATION</p>
           {navItems.map(({ id, label, icon: Icon }) => (
@@ -170,20 +270,40 @@ function App() {
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <div className="data-health"><span className={`health-dot ${projectData ? "health-on" : dataError ? "health-fallback" : ""}`} /><div><strong>{projectData ? "Project data connected" : dataError ? "Using project defaults" : "Loading project data"}</strong><small>{grid ? `${grid.length.toLocaleString()} grid records loaded` : "Furniture model · 2 products"}</small></div></div>
+          <div className="data-health">
+            <span className={`health-dot ${apiHealth.online ? "health-on" : dataError ? "health-fallback" : "health-on"}`} />
+            <div>
+              <strong>{apiHealth.online ? "FastAPI Backend Online" : projectData ? "Project data connected" : "Loading project data"}</strong>
+              <small>{grid ? `${grid.length.toLocaleString()} grid records loaded` : "Furniture model · 2 products"}</small>
+            </div>
+          </div>
           <div className="sidebar-footnote">Linear Programming Problem<br />Graphical Method · v1.0</div>
         </div>
       </aside>
 
       <div className="content-shell">
         <header className="topbar">
-          <button type="button" className="icon-button mobile-menu-button" aria-label={mobileNavOpen ? "Close navigation" : "Open navigation"} onClick={() => setMobileNavOpen(!mobileNavOpen)}>{mobileNavOpen ? <X size={20} /> : <Menu size={20} />}</button>
-          <div className="breadcrumb"><span>Workspace</span><ChevronDown size={14} /><strong>Production Optimization</strong></div>
-          <div className="topbar-actions"><span className="team-pill"><span /> T13 · ABL Demonstration</span><button type="button" className="button button-top" onClick={togglePresentation}><Expand size={15} /> {isFullscreen ? "Exit presentation" : "Presentation mode"}</button></div>
+          <button type="button" className="icon-button mobile-menu-button" aria-label={mobileNavOpen ? "Close navigation" : "Open navigation"} onClick={() => setMobileNavOpen(!mobileNavOpen)}>
+            {mobileNavOpen ? <X size={20} /> : <Menu size={20} />}
+          </button>
+          <div className="breadcrumb">
+            <span>Workspace</span><ChevronDown size={14} /><strong>Production Optimization</strong>
+          </div>
+          <div className="topbar-actions">
+            {/* Live API status badge */}
+            <span className={`api-badge ${apiHealth.online ? "api-badge-online" : "api-badge-offline"}`} title={apiHealth.online ? "Connected to FastAPI Backend at http://127.0.0.1:8000" : "Using local static data"}>
+              <span className="api-badge-dot" />
+              {apiHealth.online ? "API Connected (FastAPI)" : "Local Engine"}
+            </span>
+            <span className="team-pill"><span /> T13 · ABL Demonstration</span>
+            <button type="button" className="button button-top" onClick={togglePresentation}>
+              <Expand size={15} /> {isFullscreen ? "Exit presentation" : "Presentation mode"}
+            </button>
+          </div>
         </header>
 
         <main className="main-content">
-          {dataError && <div className="data-warning" role="status">Dataset files could not be loaded ({dataError}); using the exact project values from the brief.</div>}
+          {dataError && <div className="data-warning" role="status">Dataset note ({dataError}); using verified project model values.</div>}
           {presentationError && <div className="data-warning" role="alert">{presentationError}</div>}
 
           <section id="home" className="hero-section scroll-section">
@@ -281,22 +401,224 @@ function App() {
           <section id="business-problem" className="content-section scroll-section">
             <SectionHeading number="04" eyebrow="THE BUSINESS CASE" title="A furniture maker's challenge" description="Two products compete for the same limited labour and wood. Which production mix earns the most?" />
             <div className="problem-banner"><div className="problem-emblem"><Factory size={27} /></div><div><span>SCENARIO</span><h3>One workshop. Two products. Limited resources.</h3><p>The company wants to maximize profit without exceeding its available labour hours or wood units.</p></div><div className="problem-resources"><div><span className="resource-symbol labour-symbol"><Activity size={16} /></span><strong>240 <small>hours</small></strong><span>Labour capacity</span></div><div><span className="resource-symbol wood-symbol"><Boxes size={16} /></span><strong>240 <small>units</small></strong><span>Wood capacity</span></div></div></div>
-            <div className="product-card-grid">{products.map((product, index) => <article className={`product-card panel product-${index}`} key={product.product}><div className="product-card-head"><span className={`product-illustration illustration-${index}`}>{index === 0 ? <span className="table-illustration"><i /><b /><em /></span> : <span className="chair-illustration"><i /><b /><em /><strong /></span>}</span><span className="product-code">PRODUCT {product.variable}</span></div><div className="product-title"><div><span>FURNITURE LINE</span><h3>{product.product}</h3></div><div className="unit-profit"><strong>{product.profit}</strong><span>profit / unit</span></div></div><div className="product-specs"><div><span>LABOUR</span><strong><Activity size={15} /> {product.labour} <small>hours</small></strong></div><div><span>WOOD</span><strong><Boxes size={15} /> {product.wood} <small>units</small></strong></div></div><div className="product-brief">Per-unit contribution to the factory's shared resource limits.</div></article>)}</div>
-            <div className="product-table-wrap panel"><div className="table-title"><div><p className="eyebrow">INPUT DATA</p><h3>Unit economics & resource requirements</h3></div><span className="dataset-source">{projectData ? "Loaded from project CSV" : "Project brief values"}</span></div><table className="data-table"><thead><tr><th>Product</th><th>Decision variable</th><th>Profit / unit</th><th>Labour / unit</th><th>Wood / unit</th></tr></thead><tbody>{products.map((item) => <tr key={item.product}><td><strong>{item.product}</strong></td><td>{item.variable}</td><td>{item.profit}</td><td>{item.labour} hours</td><td>{item.wood} units</td></tr>)}</tbody></table></div>
+            <div className="product-card-grid">
+              {products.map((product, index) => (
+                <Tilt3D key={product.product} maxTilt={9} scale={1.02}>
+                  <article className={`product-card panel product-${index}`}>
+                    <div className="product-card-head">
+                      <span className={`product-illustration illustration-${index}`}>
+                        {index === 0 ? <span className="table-illustration"><i /><b /><em /></span> : <span className="chair-illustration"><i /><b /><em /><strong /></span>}
+                      </span>
+                      <span className="product-code">PRODUCT {product.variable}</span>
+                    </div>
+                    <div className="product-title">
+                      <div><span>FURNITURE LINE</span><h3>{product.product}</h3></div>
+                      <div className="unit-profit"><strong>{product.profit}</strong><span>profit / unit</span></div>
+                    </div>
+                    <div className="product-specs">
+                      <div><span>LABOUR</span><strong><Activity size={15} /> {product.labour} <small>hours</small></strong></div>
+                      <div><span>WOOD</span><strong><Boxes size={15} /> {product.wood} <small>units</small></strong></div>
+                    </div>
+                    <div className="product-brief">3D Touch interactive unit contribution.</div>
+                  </article>
+                </Tilt3D>
+              ))}
+            </div>
+            <div className="product-table-wrap panel"><div className="table-title"><div><p className="eyebrow">INPUT DATA</p><h3>Unit economics & resource requirements</h3></div><span className="dataset-source">{projectData ? (apiHealth.online ? "Loaded via FastAPI Backend" : "Loaded from project CSV") : "Project brief values"}</span></div><table className="data-table"><thead><tr><th>Product</th><th>Decision variable</th><th>Profit / unit</th><th>Labour / unit</th><th>Wood / unit</th></tr></thead><tbody>{products.map((item) => <tr key={item.product}><td><strong>{item.product}</strong></td><td>{item.variable}</td><td>{item.profit}</td><td>{item.labour} hours</td><td>{item.wood} units</td></tr>)}</tbody></table></div>
           </section>
 
           <section id="mathematical-model" className="content-section scroll-section">
             <SectionHeading number="05" eyebrow="FROM WORDS TO EQUATIONS" title="Build the mathematical model" description="Translate the business objective and each scarce resource into a linear equation." />
             <div className="model-grid">
-              <div className="model-main panel"><div className="model-title"><span className="equation-mark">ƒx</span><div><p className="eyebrow">DECISION VARIABLES</p><h3>What can the factory choose?</h3></div></div><div className="variable-pair"><div><span>X</span><p><strong>Number of tables</strong><small>Production quantity for tables</small></p></div><div><span>Y</span><p><strong>Number of chairs</strong><small>Production quantity for chairs</small></p></div></div><div className="objective-box"><div className="objective-label"><span><Target size={16} /> OBJECTIVE FUNCTION</span><small>Maximize total profit</small></div><div className="equation">MAX <em>Z</em> = <b>40X</b> + <b>30Y</b></div><p>Each table contributes 40; each chair contributes 30 currency units.</p></div><div className="constraint-list"><p className="eyebrow">SUBJECT TO RESOURCE CONSTRAINTS</p>{constraints.map((constraint, index) => <div className="constraint-equation" key={constraint.resource}><span className={`constraint-index c-index-${index}`}>C{index + 1}</span><div><strong>{constraint.equation}</strong><small>{constraint.resource}: {constraint.limit} {constraint.unit} available</small></div><span className="constraint-meaning">Per-unit use × quantity ≤ capacity</span></div>)}<div className="constraint-equation nonnegative-row"><span className="constraint-index c-index-n">N</span><div><strong>X ≥ 0 &nbsp;&nbsp; Y ≥ 0</strong><small>Non-negativity restrictions</small></div><span className="constraint-meaning">No negative production</span></div></div></div>
-              <aside className="model-aside"><div className="model-side-card"><span className="aside-step">01</span><h3>Profit objective</h3><p>Multiply each unit's profit by its production quantity, then maximize the total.</p><div className="aside-math"><span>40 × Tables</span><b>+</b><span>30 × Chairs</span></div></div><div className="model-side-card"><span className="aside-step">02</span><h3>Resource constraints</h3><p>Each product's resource use adds up; production cannot use more than the factory has.</p><div className="aside-math"><span>Used</span><b>≤</b><span>Available</span></div></div><div className="model-note"><Lightbulb size={17} /><p><strong>Think of a constraint as a boundary.</strong> The best feasible answer is found at a corner of the shaded region.</p></div></aside>
+              <Tilt3D maxTilt={6} scale={1.01}>
+                <div className="model-main panel">
+                  <div className="model-title">
+                    <span className="equation-mark">ƒx</span>
+                    <div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <p className="eyebrow" style={{ margin: 0 }}>DECISION VARIABLES & 3D MODEL</p>
+                        <span className="pill-note" style={{ color: "#3b82f6", borderColor: "#93c5fd" }}>
+                          <Sparkles size={10} /> 3D Touch
+                        </span>
+                      </div>
+                      <h3>What can the factory choose?</h3>
+                    </div>
+                  </div>
+                  <div className="variable-pair">
+                    <div>
+                      <span>X</span>
+                      <p><strong>Number of tables</strong><small>Production quantity for tables</small></p>
+                    </div>
+                    <div>
+                      <span>Y</span>
+                      <p><strong>Number of chairs</strong><small>Production quantity for chairs</small></p>
+                    </div>
+                  </div>
+                  <div className="objective-box">
+                    <div className="objective-label">
+                      <span><Target size={16} /> OBJECTIVE FUNCTION (3D ELEVATION)</span>
+                      <small>Maximize total profit</small>
+                    </div>
+                    <div className="equation">MAX <em>Z</em> = <b>40X</b> + <b>30Y</b></div>
+                    <p>In 3D space, Z represents the vertical profit plane rising above the (X, Y) feasible ground base.</p>
+                  </div>
+                  <div className="constraint-list">
+                    <p className="eyebrow">SUBJECT TO RESOURCE CONSTRAINTS</p>
+                    {constraints.map((constraint, index) => (
+                      <div className="constraint-equation" key={constraint.resource}>
+                        <span className={`constraint-index c-index-${index}`}>C{index + 1}</span>
+                        <div>
+                          <strong>{constraint.equation}</strong>
+                          <small>{constraint.resource}: {constraint.limit} {constraint.unit} available</small>
+                        </div>
+                        <span className="constraint-meaning">Boundary plane in 3D space</span>
+                      </div>
+                    ))}
+                    <div className="constraint-equation nonnegative-row">
+                      <span className="constraint-index c-index-n">N</span>
+                      <div>
+                        <strong>X ≥ 0 &nbsp;&nbsp; Y ≥ 0</strong>
+                        <small>Non-negativity restrictions</small>
+                      </div>
+                      <span className="constraint-meaning">First quadrant (X, Y ≥ 0)</span>
+                    </div>
+                  </div>
+                </div>
+              </Tilt3D>
+              <aside className="model-aside">
+                <Tilt3D maxTilt={8} scale={1.02}>
+                  <div className="model-side-card">
+                    <span className="aside-step">01</span>
+                    <h3>3D Profit Elevation</h3>
+                    <p>Each unit of tables adds +40 in height; each chair adds +30 height to the objective plane.</p>
+                    <div className="aside-math"><span>40 × Tables</span><b>+</b><span>30 × Chairs</span></div>
+                  </div>
+                </Tilt3D>
+                <Tilt3D maxTilt={8} scale={1.02}>
+                  <div className="model-side-card">
+                    <span className="aside-step">02</span>
+                    <h3>Boundary Walls</h3>
+                    <p>The labour and wood constraints slice through the space, forming the walls of the 3D feasible prism.</p>
+                    <div className="aside-math"><span>Used</span><b>≤</b><span>240 Max</span></div>
+                  </div>
+                </Tilt3D>
+                <div className="model-note">
+                  <Lightbulb size={17} />
+                  <p><strong>3D Optimization insight:</strong> The highest point of the 3D feasible prism is at vertex B (40, 40, 2800). Rotate the 3D model in the solver to see this peak!</p>
+                </div>
+              </aside>
             </div>
           </section>
 
           <section id="solver" className="content-section solver-section scroll-section">
             <SectionHeading number="06" eyebrow="TRY THE MODEL YOURSELF" title="Interactive graphical solver" description="Move the sliders and watch the plan move on the graph. The simulation recalculates profit, resource use and feasibility in real time." />
-            <GraphicalSolver tables={tables} chairs={chairs} onTablesChange={setTables} onChairsChange={setChairs} onReset={() => { setTables(0); setChairs(0); }} onOptimize={() => { setTables(Number(optimal.x)); setChairs(Number(optimal.y)); }} vertices={vertices} grid={grid} />
-            <div className="corner-comparison panel"><div className="table-title"><div><p className="eyebrow">VERTEX TEST</p><h3>Evaluate the objective at each corner</h3></div><span className="pill-note">Linear programming optimum occurs at a feasible vertex</span></div><div className="corner-cards">{vertices.map((point) => <div className={`corner-card ${point.optimal ? "corner-best" : ""}`} key={point.vertex}><div className="corner-name"><span>{point.vertex}</span>{point.optimal && <span className="best-chip"><Sparkles size={11} /> OPTIMAL</span>}</div><strong>{fmt(point.profit)}</strong><small>currency units</small><div className="corner-coordinates">({point.x}, {point.y}) · {point.x} tables, {point.y} chairs</div><div className="corner-bar"><i style={{ width: `${(point.profit / Math.max(...vertices.map((v) => v.profit))) * 100}%` }} /></div></div>)}</div><div className="corner-takeaway"><span className="takeaway-check"><Check size={15} /></span><span><strong>Highest value: B (40, 40).</strong> Z = 40(40) + 30(40) = 2,800 currency units.</span></div></div>
+            <GraphicalSolver
+              tables={tables}
+              chairs={chairs}
+              onTablesChange={setTables}
+              onChairsChange={setChairs}
+              onReset={() => { setTables(0); setChairs(0); setOptimizerMessage(""); }}
+              onOptimize={handleOptimize}
+              vertices={vertices}
+              grid={grid}
+              simulationResult={simulationResult}
+              optimizerMessage={optimizerMessage}
+              isOptimizing={isOptimizing}
+            />
+
+            <div className="corner-comparison panel">
+              <div className="table-title">
+                <div><p className="eyebrow">VERTEX TEST</p><h3>Evaluate the objective at each corner</h3></div>
+                <span className="pill-note">Linear programming optimum occurs at a feasible vertex</span>
+              </div>
+              <div className="corner-cards">
+                {vertices.map((point) => (
+                  <div
+                    className={`corner-card ${point.optimal ? "corner-best" : ""}`}
+                    key={point.vertex}
+                    style={{ cursor: "pointer" }}
+                    onClick={() => { setTables(point.x); setChairs(point.y); }}
+                    title={`Click to test Vertex ${point.vertex}`}
+                  >
+                    <div className="corner-name">
+                      <span>{point.vertex}</span>
+                      {point.optimal && <span className="best-chip"><Sparkles size={11} /> OPTIMAL</span>}
+                    </div>
+                    <strong>{fmt(point.profit)}</strong>
+                    <small>currency units</small>
+                    <div className="corner-coordinates">({point.x}, {point.y}) · {point.x} tables, {point.y} chairs</div>
+                    <div className="corner-bar"><i style={{ width: `${(point.profit / Math.max(...vertices.map((v) => v.profit))) * 100}%` }} /></div>
+                  </div>
+                ))}
+              </div>
+              <div className="corner-takeaway">
+                <span className="takeaway-check"><Check size={15} /></span>
+                <span><strong>Highest value: B (40, 40).</strong> Z = 40(40) + 30(40) = 2,800 currency units. Both labour and wood constraints bind.</span>
+              </div>
+            </div>
+
+            {/* Simulation History Log */}
+            {historyList.length > 0 && (
+              <div className="panel history-card">
+                <div className="table-title">
+                  <div>
+                    <p className="eyebrow">DATABASE LOG</p>
+                    <h3>Recent simulation history ({historyList.length} attempts)</h3>
+                  </div>
+                  <button
+                    type="button"
+                    className="button button-top"
+                    onClick={() => fetchSimulationHistory().then((h) => Array.isArray(h) && setHistoryList(h))}
+                  >
+                    <RefreshCw size={13} /> Refresh log
+                  </button>
+                </div>
+                <div className="history-table-wrap">
+                  <table className="history-table">
+                    <thead>
+                      <tr>
+                        <th>Time</th>
+                        <th>Tables (X)</th>
+                        <th>Chairs (Y)</th>
+                        <th>Profit (Z)</th>
+                        <th>Labour Used</th>
+                        <th>Wood Used</th>
+                        <th>Feasibility</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {historyList.slice(0, 10).map((item) => (
+                        <tr key={item.id}>
+                          <td>{item.created_at ? new Date(item.created_at).toLocaleTimeString() : `#${item.id}`}</td>
+                          <td><strong>{item.tables_x}</strong></td>
+                          <td><strong>{item.chairs_y}</strong></td>
+                          <td>{fmt(item.profit)} units</td>
+                          <td>{item.labour_used} / 240 h</td>
+                          <td>{item.wood_used} / 240 units</td>
+                          <td>
+                            {item.is_feasible ? (
+                              <span className="badge-feasible"><Check size={10} /> Feasible</span>
+                            ) : (
+                              <span className="badge-infeasible">Infeasible</span>
+                            )}
+                          </td>
+                          <td>
+                            <button
+                              type="button"
+                              className="btn-load-plan"
+                              onClick={() => { setTables(item.tables_x); setChairs(item.chairs_y); }}
+                            >
+                              Load
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </section>
 
           <section id="dashboard" className="content-section dashboard-section scroll-section">
@@ -319,8 +641,185 @@ function App() {
           </section>
 
           <section id="tableau" className="content-section scroll-section">
-            <SectionHeading number="08" eyebrow="EXTEND THE ANALYSIS" title="Business Intelligence Dashboard" description="Connect the mathematical model to a published Tableau visualization when your dashboard is ready." />
-            <div className="tableau-panel panel"><div className="tableau-toolbar"><div className="tableau-brand"><span className="tableau-mark"><BarChart3 size={19} /></span><div><strong>Business Intelligence Dashboard</strong><small>POWERED BY TABLEAU</small></div></div><span className="tableau-status"><i /> {TABLEAU_EMBED_URL ? "Connected dashboard" : "Awaiting dashboard URL"}</span></div>{TABLEAU_EMBED_URL ? <iframe className="tableau-frame" src={TABLEAU_EMBED_URL} title="Tableau production optimization dashboard" loading="lazy" allowFullScreen /> : <div className="tableau-placeholder"><div className="tableau-empty-icon"><Presentation size={26} /></div><span className="eyebrow">TABLEAU PUBLIC EMBED</span><h3>Your dashboard goes here.</h3><p>Tableau dashboard will be available here after publishing.</p><div className="config-hint"><span>CONFIGURATION</span><code>VITE_TABLEAU_EMBED_URL</code><span>Set in <code>frontend/.env.local</code></span></div></div>}</div>
+            <SectionHeading number="08" eyebrow="EXTEND THE ANALYSIS" title="Business Intelligence & Data Explorer" description="Inspect the full dataset of 14,641 production combinations or connect to your published Tableau dashboard." />
+            
+            {/* View Switcher Tabs */}
+            <div className="explorer-tab-bar">
+              <button
+                type="button"
+                className={`tab-btn ${tableauTab === "tableau" ? "tab-btn-active" : ""}`}
+                onClick={() => setTableauTab("tableau")}
+              >
+                <Presentation size={15} /> Tableau BI Dashboard
+              </button>
+              <button
+                type="button"
+                className={`tab-btn ${tableauTab === "grid" ? "tab-btn-active" : ""}`}
+                onClick={() => setTableauTab("grid")}
+              >
+                <Table size={15} /> Production Grid Explorer (14,641 Combinations)
+              </button>
+            </div>
+
+            {tableauTab === "tableau" ? (
+              <div className="tableau-panel panel">
+                <div className="tableau-toolbar">
+                  <div className="tableau-brand">
+                    <span className="tableau-mark"><BarChart3 size={19} /></span>
+                    <div><strong>Business Intelligence Dashboard</strong><small>POWERED BY TABLEAU</small></div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    <a
+                      href="https://public.tableau.com/views/SmartProductionOptimizationsystem-LinearProgrammingDashboard/SmartProductionOptimizationSystemLinearProgrammingDashboard?:language=en-US&:display_count=n&:origin=viz_share_link"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="button button-top"
+                      style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+                      title="Open in Tableau Public"
+                    >
+                      <ExternalLink size={13} /> Open in Tableau Public
+                    </a>
+                    <span className="tableau-status"><i /> {TABLEAU_EMBED_URL ? "Connected dashboard" : "Awaiting dashboard URL"}</span>
+                  </div>
+                </div>
+                {TABLEAU_EMBED_URL ? (
+                  <iframe
+                    className="tableau-frame"
+                    src={TABLEAU_EMBED_URL}
+                    title="Tableau production optimization dashboard"
+                    loading="lazy"
+                    allowFullScreen
+                    style={{ width: "100%", minHeight: "750px", border: "0" }}
+                  />
+                ) : (
+                  <div className="tableau-placeholder">
+                    <div className="tableau-empty-icon"><Presentation size={26} /></div>
+                    <span className="eyebrow">TABLEAU PUBLIC EMBED</span>
+                    <h3>Tableau Visualization Ready to Connect</h3>
+                    <p>When you publish your Tableau workbook, configure the embed URL to render the interactive dashboard directly here.</p>
+                    <div className="config-hint">
+                      <span>CONFIGURATION</span>
+                      <code>VITE_TABLEAU_EMBED_URL</code>
+                      <span>Set in <code>frontend/.env</code></span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="panel" style={{ overflow: "hidden" }}>
+                <div className="explorer-controls">
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <Database size={15} style={{ color: "#3b82f6" }} />
+                    <strong>SQLite Production Grid Table</strong>
+                    <span style={{ color: "#64748b" }}>({gridData.total.toLocaleString()} total points)</span>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span>Filter:</span>
+                      <select
+                        value={gridFilter}
+                        onChange={(e) => {
+                          setGridFilter(e.target.value);
+                          setGridData((p) => ({ ...p, page: 1 }));
+                        }}
+                      >
+                        <option value="">All Points</option>
+                        <option value="yes">Feasible Only (Yes)</option>
+                        <option value="no">Infeasible Only (No)</option>
+                      </select>
+                    </label>
+                    <div className="pagination-bar">
+                      <button
+                        type="button"
+                        className="pagination-btn"
+                        disabled={gridData.page <= 1 || gridLoading}
+                        onClick={() => setGridData((p) => ({ ...p, page: p.page - 1 }))}
+                      >
+                        Prev
+                      </button>
+                      <span>Page {gridData.page} of {Math.ceil(gridData.total / gridData.pageSize) || 1}</span>
+                      <button
+                        type="button"
+                        className="pagination-btn"
+                        disabled={gridData.page >= Math.ceil(gridData.total / gridData.pageSize) || gridLoading}
+                        onClick={() => setGridData((p) => ({ ...p, page: p.page + 1 }))}
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="history-table-wrap" style={{ maxHeight: 360 }}>
+                  <table className="history-table">
+                    <thead>
+                      <tr>
+                        <th>Tables (X)</th>
+                        <th>Chairs (Y)</th>
+                        <th>Labour Used</th>
+                        <th>Labour Slack</th>
+                        <th>Wood Used</th>
+                        <th>Wood Slack</th>
+                        <th>Profit (Z)</th>
+                        <th>Status</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {gridLoading ? (
+                        <tr>
+                          <td colSpan={9} style={{ textAlign: "center", padding: 24, color: "#64748b" }}>
+                            Loading grid rows from database...
+                          </td>
+                        </tr>
+                      ) : gridData.rows.length === 0 ? (
+                        <tr>
+                          <td colSpan={9} style={{ textAlign: "center", padding: 24, color: "#64748b" }}>
+                            No grid rows found. Start the backend API to query the database.
+                          </td>
+                        </tr>
+                      ) : (
+                        gridData.rows.map((row, idx) => (
+                          <tr key={`${row.tables_x}-${row.chairs_y}-${idx}`}>
+                            <td><strong>{row.tables_x}</strong></td>
+                            <td><strong>{row.chairs_y}</strong></td>
+                            <td>{row.labour_used} / 240 h</td>
+                            <td style={{ color: row.labour_slack < 0 ? "#dc2626" : "#475569" }}>
+                              {row.labour_slack} h
+                            </td>
+                            <td>{row.wood_used} / 240 u</td>
+                            <td style={{ color: row.wood_slack < 0 ? "#dc2626" : "#475569" }}>
+                              {row.wood_slack} u
+                            </td>
+                            <td><strong>{fmt(row.profit)}</strong></td>
+                            <td>
+                              {String(row.is_feasible).toLowerCase() === "yes" ? (
+                                <span className="badge-feasible"><Check size={10} /> Feasible</span>
+                              ) : (
+                                <span className="badge-infeasible">Infeasible</span>
+                              )}
+                            </td>
+                            <td>
+                              <button
+                                type="button"
+                                className="btn-load-plan"
+                                onClick={() => {
+                                  setTables(row.tables_x);
+                                  setChairs(row.chairs_y);
+                                  navigateTo("solver");
+                                }}
+                              >
+                                Test on graph
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </section>
 
           <section id="insights" className="content-section scroll-section">

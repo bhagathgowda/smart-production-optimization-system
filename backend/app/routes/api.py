@@ -11,7 +11,7 @@ from ..services.optimization import simulate, solve_lpp
 
 router = APIRouter(prefix="/api")
 
-@router.get("/health")
+@router.api_route("/health", methods=["GET", "HEAD"])
 def health():
     return {"status": "healthy", "service": "Smart Production Optimization API"}
 
@@ -96,15 +96,31 @@ async def upload_dataset(dataset_type: str = Form(...), file: UploadFile = File(
     missing = required[dataset_type] - set(frame.columns)
     if missing:
         raise HTTPException(status_code=422, detail=f"Missing required columns: {', '.join(sorted(missing))}")
-    if frame.isna().any().any():
+    if dataset_type != "grid" and frame.isna().any().any():
         raise HTTPException(status_code=422, detail="CSV contains missing values")
 
     imported = 0
     if dataset_type == "grid":
         db.query(ProductionGrid).delete()
+        grid_items = []
         for _, row in frame.iterrows():
-            db.add(ProductionGrid(tables_x=int(row.Tables_X), chairs_y=int(row.Chairs_Y), labour_used=float(row.Labour_Used_Hours), labour_available=float(row.Labour_Available_Hours), wood_used=float(row.Wood_Used_Units), wood_available=float(row.Wood_Available_Units), labour_slack=float(row.Labour_Slack_Hours), wood_slack=float(row.Wood_Slack_Units), profit=float(row.Profit), is_feasible=str(row.Is_Feasible), feasible_profit=float(row.Feasible_Profit)))
+            fp = row.get("Feasible_Profit")
+            feasible_profit = float(fp) if pd.notna(fp) and str(fp).strip() != "" else None
+            grid_items.append(ProductionGrid(
+                tables_x=int(row.Tables_X),
+                chairs_y=int(row.Chairs_Y),
+                labour_used=float(row.Labour_Used_Hours),
+                labour_available=float(row.Labour_Available_Hours),
+                wood_used=float(row.Wood_Used_Units),
+                wood_available=float(row.Wood_Available_Units),
+                labour_slack=float(row.Labour_Slack_Hours),
+                wood_slack=float(row.Wood_Slack_Units),
+                profit=float(row.Profit),
+                is_feasible=str(row.Is_Feasible),
+                feasible_profit=feasible_profit
+            ))
             imported += 1
+        db.add_all(grid_items)
     elif dataset_type == "constraints":
         db.query(Constraint).delete()
         for _, row in frame.iterrows():
